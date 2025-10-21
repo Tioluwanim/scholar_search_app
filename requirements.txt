@@ -1,0 +1,10 @@
+streamlit
+requests
+pandas
+fastapi
+uvicorn
+requests
+python-dotenv
+beautifulsoup4
+lxml
+pydantic
