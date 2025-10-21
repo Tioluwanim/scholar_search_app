@@ -10,7 +10,7 @@ st.set_page_config(
     layout="wide"
 )
 
-BACKEND_BASE = st.secrets.get("BACKEND_URL", "http://127.0.0.1:8000")
+BACKEND_BASE = "https://scholar-search-app-backend.onrender.com"
 
 # ---------------- HEADER ----------------
 st.title("📘 Scholar Downloader")
