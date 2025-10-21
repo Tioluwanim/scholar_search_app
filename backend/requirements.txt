@@ -1,9 +1,10 @@
 fastapi
 uvicorn
 requests
+httpx
 beautifulsoup4
 python-dotenv
-pandas
-python-docx
-openpyxl
+pydantic
 aiofiles
+shutilwhich
+serpapi
