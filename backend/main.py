@@ -25,8 +25,64 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = FastAPI(title="Scholar Downloader API 🚀")
 
-# Async client
-client = httpx.AsyncClient(timeout=25.0, headers={"User-Agent": f"scholar-downloader (+{UNPAYWALL_EMAIL})"})
+# ---------------- Robust HTTP Client ----------------
+client = httpx.AsyncClient(
+    timeout=30.0,
+    headers={
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/128.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Connection": "keep-alive",
+    }
+)
+
+BLOCKED_DOMAINS = ["lww.com", "sagepub.com", "medrxiv.org"]
+
+async def safe_get(url, params=None, retries=3):
+    """Improved HTTP GET with retry, delay, and block handling."""
+    if any(domain in url for domain in BLOCKED_DOMAINS):
+        logging.warning(f"⛔ Skipping blocked domain: {url}")
+        return None
+
+    for attempt in range(retries):
+        try:
+            r = await client.get(url, params=params, follow_redirects=True)
+            status = r.status_code
+
+            if status == 200:
+                return r
+
+            elif status == 403:
+                logging.warning(f"🚫 Forbidden (403) on attempt {attempt+1}: {url}")
+                return None
+
+            elif status in [429, 500, 502, 503]:
+                delay = random.uniform(2, 5) * (attempt + 1)
+                logging.warning(f"⚠️ {status} received — retrying in {delay:.1f}s: {url}")
+                await asyncio.sleep(delay)
+                continue
+
+            else:
+                logging.warning(f"❌ Unexpected status {status} for {url}")
+                return None
+
+        except httpx.ReadTimeout:
+            delay = random.uniform(2, 4)
+            logging.warning(f"⏳ Timeout — retrying in {delay:.1f}s ({attempt+1}/{retries})")
+            await asyncio.sleep(delay)
+
+        except httpx.RequestError as e:
+            delay = random.uniform(1, 3)
+            logging.warning(f"⚡ Connection error: {e} — retrying in {delay:.1f}s")
+            await asyncio.sleep(delay)
+
+    logging.error(f"❌ Failed after {retries} attempts: {url}")
+    return None
 
 
 # ---------------- Models ----------------
@@ -39,20 +95,7 @@ class DownloadRequest(BaseModel):
     author_name: str
 
 
-# ---------------- Helper ----------------
-async def safe_get(url, params=None, retries=3):
-    """Make a robust async HTTP GET with retry + delay."""
-    for attempt in range(retries):
-        try:
-            r = await client.get(url, params=params)
-            if r.status_code == 200:
-                return r
-        except Exception as e:
-            logging.warning(f"Request failed ({attempt+1}/{retries}): {e}")
-        await asyncio.sleep(random.uniform(0.5, 1.5) * (attempt + 1))
-    return None
-
-
+# ---------------- Helper Functions ----------------
 async def query_unpaywall(doi):
     if not doi:
         return None
@@ -66,7 +109,6 @@ async def query_unpaywall(doi):
 
 
 async def find_pdf_for_paper(paper):
-    """Try multiple PDF sources."""
     oap = paper.get("openAccessPdf")
     if oap and oap.get("url"):
         return oap["url"]
@@ -87,7 +129,6 @@ async def find_pdf_for_paper(paper):
 
 # ---------------- Search Engines ----------------
 async def search_semantic_scholar(name):
-    """Search papers from Semantic Scholar."""
     logging.info(f"🔎 Semantic Scholar → {name}")
     papers, offset = [], 0
 
@@ -115,7 +156,6 @@ async def search_semantic_scholar(name):
 
 
 async def search_openalex(name):
-    """Search using OpenAlex API."""
     logging.info(f"📚 OpenAlex → {name}")
     papers, cursor = [], "*"
 
@@ -141,7 +181,6 @@ async def search_openalex(name):
 
 
 async def search_google_scholar_serpapi(name):
-    """Structured query through SerpAPI."""
     if not SERP_API_KEY:
         return []
     logging.info(f"🔍 SerpAPI → {name}")
@@ -171,7 +210,6 @@ async def search_google_scholar_serpapi(name):
 
 
 async def search_google_scholar_scrape(name):
-    """BeautifulSoup Google Scholar scraper."""
     logging.info(f"🧠 Scraping Google Scholar → {name}")
     base_url = "https://scholar.google.com/scholar"
     query = name.replace(" ", "+")
@@ -224,7 +262,6 @@ async def search_papers(req: SearchRequest):
         author_data = {"Researcher": name, "papers": []}
         try:
             all_papers = []
-
             tasks = [
                 search_semantic_scholar(name),
                 search_openalex(name),
@@ -234,7 +271,6 @@ async def search_papers(req: SearchRequest):
             for s in sources:
                 all_papers.extend(s)
 
-            # Remove duplicates
             seen_titles, unique_papers = set(), []
             for p in all_papers:
                 title = (p.get("title") or "").strip().lower()
@@ -242,7 +278,6 @@ async def search_papers(req: SearchRequest):
                     seen_titles.add(title)
                     unique_papers.append(p)
 
-            # Enrich with PDFs
             for idx, p in enumerate(unique_papers, start=1):
                 pdf = await find_pdf_for_paper(p)
                 author_data["papers"].append({
@@ -266,22 +301,22 @@ async def download_and_zip(pdf_urls, author_name):
     folder = Path(f"downloads/{author_name.replace(' ', '_')}")
     folder.mkdir(parents=True, exist_ok=True)
 
+    seen_urls = set()
     for i, url in enumerate(pdf_urls):
-        if not url:
+        if not url or url in seen_urls:
             continue
+        seen_urls.add(url)
         try:
             r = await safe_get(url)
             if r and "pdf" in r.headers.get("content-type", "").lower():
                 with open(folder / f"paper_{i+1}.pdf", "wb") as f:
                     f.write(r.content)
-        except Exception:
-            continue
+        except Exception as e:
+            logging.warning(f"Failed to download {url}: {e}")
         await asyncio.sleep(0.3)
 
     zip_path = f"{folder}.zip"
     shutil.make_archive(str(folder), "zip", folder)
-
-    # Optional cleanup (delete folder after zip)
     shutil.rmtree(folder)
     return zip_path
 
